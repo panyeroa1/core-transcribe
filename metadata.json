@@ -1,0 +1,7 @@
+{
+  "name": "EBURON Core",
+  "description": "A centralized intelligence layer for live transcription, rapid response, and multi-modal audio processing.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
