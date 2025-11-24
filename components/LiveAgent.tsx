@@ -51,7 +51,7 @@ const MessageBubble: React.FC<{ msg: Message, showOriginalOnly: boolean }> = ({ 
 
   if (isSystem) {
     return (
-        <div className="flex justify-center my-2">
+        <div className="flex justify-center my-2 animate-fade-in">
             <div className="bg-slate-800/80 backdrop-blur text-cyan-400 text-xs font-mono border border-slate-700 rounded-full px-4 py-1 shadow-sm flex items-center gap-2">
                 <CpuChipIcon className="w-3 h-3" />
                 {msg.text}
@@ -106,6 +106,7 @@ export const LiveAgent: React.FC = () => {
   const sourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
   const transcriptContainerRef = useRef<HTMLDivElement>(null);
   const outputGainRef = useRef<GainNode | null>(null);
+  const turnLanguageDetectedRef = useRef(false);
 
   // Refs for current transcript accumulation
   const currentInputTransRef = useRef('');
@@ -170,6 +171,7 @@ export const LiveAgent: React.FC = () => {
     nextStartTimeRef.current = 0;
     setVolume(0);
     setStreamingInput('');
+    turnLanguageDetectedRef.current = false;
   }, []);
 
   const handleVolumeChange = (newVol: number) => {
@@ -245,34 +247,37 @@ export const LiveAgent: React.FC = () => {
       processor.connect(inCtx.destination); 
 
       // 6. Start Gemini Session
+      
+      const baseInstruction = `
+      You are EBURON.
+      
+      CRITICAL LANGUAGE DETECTION PROTOCOL:
+      1. Continuously analyze the language of the user's input audio.
+      2. If you detect a language, YOU MUST start your textual response with [LANG:LanguageName] (e.g. [LANG:English], [LANG:Spanish], [LANG:Tagalog]).
+      3. CRITICAL: DO NOT SPEAK this tag. It is for metadata only. The audio output must only contain your natural response.
+      `;
+
       let systemInstruction = "";
       
       if (translationEnabled) {
-          systemInstruction = `You are EBURON, a specialized REAL-TIME TRANSLATOR.
-          
-          PROTOCOL:
-          1. Listen strictly to the input audio.
-          2. Translate the input audio into English (or the most logical target language if input is English).
-          3. Output ONLY the translation.
-          4. Do not converse, do not answer questions. Just translate.
-          5. If speaker labels are clear, preserve them in the translation.
+          systemInstruction = `${baseInstruction}
+          MODE: REAL-TIME TRANSLATOR.
+          1. Translate the input audio into English (or the most logical target language).
+          2. Output ONLY the translation text after the [LANG:...] tag.
+          3. Do not converse.
           `;
       } else if (diarizationEnabled) {
-         systemInstruction = `You are EBURON. You are a precise, professional AI system with ADVANCED SPEAKER RECOGNITION.
-          
-          STRICT SPEAKER DIARIZATION PROTOCOL:
-          1. You are listening to a live audio stream that may contain multiple speakers (users, guests, system audio).
-          2. ACTIVELY IDENTIFY separate voices based on tone, pitch, and cadence.
-          3. ASSIGN LABELS: Use [Speaker 1], [Speaker 2], etc. consistently for distinct voices.
-          4. When you reply or summarize, YOU MUST PREPEND the speaker label if you are quoting or attributing text.
-          5. Example output: "[Speaker 1]: Hello Eburon. [Speaker 2]: Hi there."
-          6. Maintain this context throughout the session.`;
+         systemInstruction = `${baseInstruction}
+          MODE: ADVANCED SPEAKER DIARIZATION.
+          1. Actively identify distinct voices ([Speaker 1], [Speaker 2]).
+          2. Prepend speaker labels to your text response (after the [LANG:...] tag).
+          3. Example: "[LANG:English] [Speaker 1]: Hello."
+          `;
       } else {
-         systemInstruction = `You are EBURON. You are a precise, professional AI system.
-          
-          PROTOCOL:
-          1. Listen to the audio stream carefully.
-          2. Be helpful, concise, and speak naturally.`;
+         systemInstruction = `${baseInstruction}
+          MODE: ASSISTANT.
+          1. Be helpful, concise, and speak naturally.
+          `;
       }
 
       const config = {
@@ -366,8 +371,23 @@ export const LiveAgent: React.FC = () => {
 
              // Handle Transcription
              if (msg.serverContent?.outputTranscription) {
-               currentOutputTransRef.current += msg.serverContent.outputTranscription.text;
+               const text = msg.serverContent.outputTranscription.text;
+               currentOutputTransRef.current += text;
+
+               // Parse Language Tag
+               const langMatch = currentOutputTransRef.current.match(/^\[LANG:(.*?)\]/);
+               if (langMatch && !turnLanguageDetectedRef.current) {
+                   const detectedLang = langMatch[1];
+                   setTranscripts(prev => [...prev, {
+                       id: Date.now() + 'sys-lang',
+                       role: 'system',
+                       text: `Language Detected: ${detectedLang}`,
+                       timestamp: new Date()
+                   }]);
+                   turnLanguageDetectedRef.current = true;
+               }
              }
+
              if (msg.serverContent?.inputTranscription) {
                const text = msg.serverContent.inputTranscription.text;
                currentInputTransRef.current += text;
@@ -388,8 +408,12 @@ export const LiveAgent: React.FC = () => {
                   setStreamingInput(''); // Clear streaming UI as it's now permanent
                 }
                 if (currentOutputTransRef.current.trim()) {
-                  const text = currentOutputTransRef.current;
-                   setTranscripts(prev => [...prev, {
+                  let text = currentOutputTransRef.current;
+                  
+                  // Strip language tag from final output
+                  text = text.replace(/^\[LANG:.*?\]\s*/, '');
+
+                  setTranscripts(prev => [...prev, {
                     id: Date.now().toString() + 'm',
                     role: 'model',
                     text: text,
@@ -397,6 +421,7 @@ export const LiveAgent: React.FC = () => {
                   }]);
                   saveTranscript(text, 'model', 'live');
                   currentOutputTransRef.current = '';
+                  turnLanguageDetectedRef.current = false;
                 }
              }
           },
